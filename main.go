@@ -8,6 +8,12 @@ package main
  * ....
  * ....
  * sqldiff -dsn ~/dbinfo.json -table1 bak_hoges -table2 hoges
+ *
+ *
+ * 復帰値
+ *   0: 一致
+ *   1: 不一致
+ *   2: エラー
  */
 
 import (
@@ -27,9 +33,13 @@ import (
 type option struct {
 	column   string
 	modified bool
+	header   bool
 	fp       io.Writer
 	driver   string
 	dsn      string
+	table1   string
+	table2   string
+	nrow     int
 }
 
 //////////////////////////////////////////////////////////
@@ -71,19 +81,37 @@ func toString(v interface{}, ct *sql.ColumnType) string {
 	panic("unsupported: " + ct.ScanType().String())
 }
 
+func (opt *option) printHeader() {
+	if opt.header {
+		fmt.Printf("--- %s\n", opt.table1)
+		fmt.Printf("+++ %s\n", opt.table2)
+		opt.header = false
+	}
+}
+
 func (opt *option) printRow(prefix string, row []interface{}) error {
+	if opt.nrow == 0 && opt.header {
+		opt.printHeader()
+	}
+	opt.nrow++
+
 	id := *row[0].(*int32)
-	fmt.Printf("%s%s id=%d\n", prefix, prefix, id)
+	fmt.Printf("%s@@ id=%d\n", prefix, id)
 	return nil
 }
 func (opt *option) isSkip(col string) bool {
 	return opt.modified && (col == "created" || col == "modified" || col == "created_user" || col == "modified_user")
 }
 
-func diff(table1, table2 string, opt option) error {
+/*
+ * return:
+ *   true: 一致
+ *   false: 不一致
+ */
+func diff(table1, table2 string, opt option) (bool, error) {
 	db, err := sql.Open(opt.driver, opt.dsn)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer db.Close()
 
@@ -91,7 +119,7 @@ func diff(table1, table2 string, opt option) error {
 	rows1, err := db.Query(sql1)
 	if err != nil {
 		fmt.Printf("query failed: %s\n", sql1)
-		return err
+		return false, err
 	}
 	defer rows1.Close()
 
@@ -99,20 +127,20 @@ func diff(table1, table2 string, opt option) error {
 	rows2, err := db.Query(sql2)
 	if err != nil {
 		fmt.Printf("query failed: %s\n", sql2)
-		return err
+		return false, err
 	}
 	defer rows2.Close()
 
 	colnames, err := rows1.Columns()
 	if err != nil {
 		fmt.Printf("columns failed: %s\n", sql1)
-		return err
+		return false, err
 	}
 
 	coltypes, err := rows1.ColumnTypes()
 	if err != nil {
 		fmt.Printf("coltype failed: %s\n", sql1)
-		return err
+		return false, err
 	}
 
 	v1 := make([]interface{}, len(colnames))
@@ -148,7 +176,7 @@ func diff(table1, table2 string, opt option) error {
 	}
 
 	if true {
-		nrow := 0
+		opt.nrow = 0
 
 		for i := 0; ; i++ {
 			if !rows1.Next() {
@@ -156,19 +184,17 @@ func diff(table1, table2 string, opt option) error {
 					err = rows2.Scan(v2...)
 					if err != nil {
 						fmt.Printf("row2 scan failed. i=%d\n", i)
-						return err
+						return false, err
 					}
 					opt.printRow("+", v2)
-					nrow++
 					continue
 				}
 				break
 			} else if !rows2.Next() {
-				nrow++
 				err = rows1.Scan(v1...)
 				if err != nil {
 					fmt.Printf("row1 scan failed. i=%d\n", i)
-					return err
+					return false, err
 				}
 				opt.printRow("+", v1)
 				continue
@@ -177,12 +203,12 @@ func diff(table1, table2 string, opt option) error {
 			err = rows1.Scan(v1...)
 			if err != nil {
 				fmt.Printf("row1 scan failed. i=%d\n", i)
-				return err
+				return false, err
 			}
 			err = rows2.Scan(v2...)
 			if err != nil {
 				fmt.Printf("row2 scan failed. i=%d\n", i)
-				return err
+				return false, err
 			}
 
 			updated := false
@@ -194,18 +220,21 @@ func diff(table1, table2 string, opt option) error {
 				s1 := toString(v1[j], coltypes[j])
 				s2 := toString(v2[j], coltypes[j])
 				if s1 != s2 {
+					opt.printHeader()
 					updated = true
-					fmt.Printf("id=(%4d,%4d), %20s=(%s,%s)\n", *v1[0].(*int32), *v2[0].(*int32), colnames[j], s1, s2)
+					fmt.Printf("    id=(%4d,%4d), %20s=(%s,%s)\n", *v1[0].(*int32), *v2[0].(*int32), colnames[j], s1, s2)
 				}
 			}
 			if updated {
-				nrow++
+				opt.nrow++
 			}
 		}
-		fmt.Printf("%d rows are found\n", nrow)
+		if opt.nrow > 0 {
+			fmt.Printf("      %d rows are found\n", opt.nrow)
+		}
 	}
 
-	return nil
+	return opt.nrow == 0, nil
 }
 
 //////////////////////////////////////////////////////////
@@ -284,6 +313,7 @@ func main() {
 		table2   = flag.String("table2", "", "table name WITH where query")
 		column   = flag.String("column", "*", "default *")
 		modified = flag.Bool("modified", false, "except created, created_user, modified, modified_user")
+		header   = flag.Bool("p", false, "print")
 	)
 
 	flag.Usage = func() {
@@ -304,9 +334,18 @@ func main() {
 	opt.fp = os.Stdout
 	opt.driver = *driver
 	opt.dsn = dsn
+	opt.header = *header
+	opt.table1 = *table1
+	opt.table2 = *table2
 
-	err = diff(*table1, *table2, opt)
+	ret, err := diff(*table1, *table2, opt)
 	if err != nil {
-		panic(err)
+		fmt.Printf("%v\n", err)
+		os.Exit(2)
+	}
+	if ret {
+		os.Exit(0)
+	} else {
+		os.Exit(1)
 	}
 }
