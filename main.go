@@ -75,6 +75,8 @@ func toString(v interface{}, ct *sql.ColumnType) string {
 		return fmt.Sprintf("%d", *v.(*int8))
 	case "int32":
 		return fmt.Sprintf("%d", *v.(*int32))
+	case "uint32":
+		return fmt.Sprintf("%v", *v.(*uint32))
 	case "int64":
 		return fmt.Sprintf("%d", *v.(*int64))
 	}
@@ -169,6 +171,9 @@ func diff(table1, table2 string, opt option) (bool, error) {
 		case "int32":
 			v1[i] = new(int32)
 			v2[i] = new(int32)
+		case "uint32":
+			v1[i] = new(uint32)
+			v2[i] = new(uint32)
 		default:
 			fmt.Printf("type=%v, %s\n", ct.ScanType(), ct.ScanType().String())
 			panic("unsupported")
